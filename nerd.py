@@ -1,32 +1,37 @@
 #!/usr/bin/env python3
 
 """
-NERD (Network Exploration & Recon Dorks) v3.0
-=============================================
+NERD (Network Exploration & Recon Dorks)
+https://github.com/z-tejani/TinyTools/blob/main/nerd.py
+========================================
 
-The ultimate CLI tool for Google Dorking.
-
-Features:
-- Build complex queries manually.
-- Use pre-built "recipes" (presets) for common tasks.
-- Filter results by date.
-- Automatically open results in your default browser.
-- Save queries to a file.
-- "Explain" mode to learn how the dork works.
+The "Swiss Army Knife" of Reconnaissance.
+Now supports PASSIVE (Dorks) and ACTIVE (Direct) reconnaissance.
 
 Usage:
   nerd --preset sql_dumps --site target.com --open
-  nerd "confidential" --filetype pdf --after 2024-01-01 --output dorks.txt
-  nerd --preset git_folders --explain
+  nerd --site target.com --active
 """
 
 import argparse
 import sys
 import webbrowser
 import urllib.parse
+import urllib.request
+import urllib.error
+import socket
+import json
+import subprocess
 from datetime import datetime
 
-# --- Built-in Dork Recipes ---
+ENGINES = {
+    "google": "https://www.google.com/search?q=",
+    "bing": "https://www.bing.com/search?q=",
+    "duckduckgo": "https://duckduckgo.com/?q=",
+    "yahoo": "https://search.yahoo.com/search?p=",
+    "ask": "https://www.ask.com/web?q="
+}
+
 PRESETS = {
     "login_pages": {
         "dork": 'inurl:login OR inurl:signin OR intitle:"Login" OR intitle:"Sign In"',
@@ -46,7 +51,7 @@ PRESETS = {
     },
     "env_files": {
         "dork": 'ext:env OR filetype:env "DB_PASSWORD"',
-        "desc": "Finds .env files often used by frameworks (Laravel, Node) to store secrets."
+        "desc": "Finds .env files often used by frameworks (Laravel, Node)."
     },
     "wordpress_users": {
         "dork": 'inurl:/wp-json/wp/v2/users',
@@ -78,28 +83,115 @@ PRESETS = {
     }
 }
 
-def create_dork_query(args):
-    """Combines arguments and presets into a Google dork query string."""
+def perform_active_recon(target):
+    """
+    Performs direct connection to the target to gather intelligence.
+    WARNING: This creates traffic logs on the target server.
+    """
+    print(f"\n[!] INITIATING ACTIVE RECON ON: {target}")
+    print("[!] WARNING: This interaction is being logged by the target.")
+    print("-" * 50)
     
+    results = {}
+
+    domain = target.replace("https://", "").replace("http://", "").split("/")[0]
+    results['domain'] = domain
+
+    try:
+        ip_address = socket.gethostbyname(domain)
+        print(f"[*] DNS Resolution : {domain} -> {ip_address}")
+        results['ip'] = ip_address
+    except socket.gaierror:
+        print(f"[!] DNS Resolution : FAILED (Could not resolve {domain})")
+        results['ip'] = None
+
+    user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) NERD-Security-Tool/5.0'
+    headers = {'User-Agent': user_agent}
+    
+    target_url = f"http://{domain}"
+    
+    try:
+        req = urllib.request.Request(target_url, headers=headers, method="HEAD")
+        with urllib.request.urlopen(req, timeout=5) as response:
+            server_header = response.headers.get('Server', 'Unknown')
+            x_powered_by = response.headers.get('X-Powered-By', 'Not Found')
+            print(f"[*] Server Header  : {server_header}")
+            print(f"[*] Technology     : {x_powered_by}")
+            
+            results['server'] = server_header
+            results['tech'] = x_powered_by
+            results['status'] = response.status
+
+    except urllib.error.URLError as e:
+        print(f"[!] HTTP Check     : FAILED ({e})")
+        results['http_error'] = str(e)
+    except Exception as e:
+        print(f"[!] Error          : {e}")
+
+    robots_url = f"http://{domain}/robots.txt"
+    try:
+        req = urllib.request.Request(robots_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=5) as response:
+            content = response.read().decode('utf-8', errors='ignore')
+            print(f"[*] Robots.txt     : FOUND")
+            
+            disallowed = [line.strip() for line in content.split('\n') if "Disallow:" in line]
+            if disallowed:
+                print(f"    -> Found {len(disallowed)} hidden paths (showing first 5):")
+                for entry in disallowed[:5]:
+                    print(f"       {entry}")
+            else:
+                print("    -> No 'Disallow' entries found.")
+            
+            results['robots_found'] = True
+            results['hidden_paths'] = disallowed
+            
+    except urllib.error.HTTPError:
+        print(f"[*] Robots.txt     : NOT FOUND (404)")
+        results['robots_found'] = False
+    except Exception:
+        print(f"[*] Robots.txt     : UNREACHABLE")
+
+    print("-" * 50)
+    return results
+
+def copy_to_clipboard(text):
+    try:
+        if sys.platform == "darwin":
+            process = subprocess.Popen('pbcopy', env={'LANG': 'en_US.UTF-8'}, stdin=subprocess.PIPE)
+            process.communicate(text.encode('utf-8'))
+        elif sys.platform == "win32":
+            subprocess.run(['clip'], input=text.strip().encode('utf-16'), check=True)
+        else:
+            try:
+                subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode('utf-8'), check=True)
+            except FileNotFoundError:
+                try:
+                    subprocess.run(['xsel', '--clipboard', '--input'], input=text.encode('utf-8'), check=True)
+                except FileNotFoundError:
+                    print("[!] Error: xclip or xsel not found. Cannot copy to clipboard.")
+                    return False
+        return True
+    except Exception as e:
+        print(f"[!] Clipboard Error: {e}")
+        return False
+
+def create_dork_query(args):
     query_parts = []
 
-    # 1. Handle Presets
     if args.preset:
         if args.preset in PRESETS:
-            # Wrap in parens for safety when combining with other ops
             query_parts.append(f"({PRESETS[args.preset]['dork']})")
         else:
             print(f"Error: Preset '{args.preset}' not found.")
             sys.exit(1)
 
-    # 2. Handle Manual Keywords
     if args.keywords:
         if " " in args.keywords and not '"' in args.keywords:
              query_parts.append(f'"{args.keywords}"')
         else:
             query_parts.append(args.keywords)
 
-    # 3. Add Search Operators
     if args.site: query_parts.append(f"site:{args.site}")
     if args.filetype: query_parts.append(f"filetype:{args.filetype}")
     if args.ext: query_parts.append(f"ext:{args.ext}")
@@ -108,65 +200,52 @@ def create_dork_query(args):
     if args.intext: query_parts.append(f"intext:{args.intext}")
     if args.exclude: query_parts.append(f"-{args.exclude}")
 
-    # 4. Date Filters
     if args.after: query_parts.append(f"after:{args.after}")
     if args.before: query_parts.append(f"before:{args.before}")
 
     return " ".join(query_parts)
 
 def explain_dork(args, query):
-    """Prints a human-readable explanation of the query."""
     print("\n--- Dork Explanation ---")
-    
-    if args.preset:
-        print(f"[*] Base Preset: {args.preset}")
-        print(f"    -> {PRESETS[args.preset]['desc']}")
-        
-    if args.keywords:
-        print(f"[*] Keywords: Searching for literal text '{args.keywords}'")
-        
-    if args.site:
-        print(f"[*] Scope: Restricted to domain '{args.site}'")
-        
-    if args.filetype or args.ext:
-        ft = args.filetype if args.filetype else args.ext
-        print(f"[*] File Extension: Looking specifically for '{ft}' files")
-        
-    if args.exclude:
-        print(f"[*] Filtering: Removing results containing '{args.exclude}'")
-        
-    if args.after or args.before:
-        print(f"[*] Timeframe: Filtering by date ({args.after or 'Any'} to {args.before or 'Now'})")
-        
+    if args.preset: print(f"[*] Preset: {args.preset} -> {PRESETS[args.preset]['desc']}")
+    if args.site: print(f"[*] Scope: Restricted to '{args.site}'")
+    print(f"[*] Engine: {args.engine.capitalize()}")
     print("------------------------\n")
 
 def main():
     parser = argparse.ArgumentParser(
         prog="nerd",
-        description="NERD: Network Exploration & Recon Dorks",
+        description="NERD v5.0: Network Exploration & Recon Dorks",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+Supported Engines:
+  google, bing, duckduckgo, yahoo, ask
+
 Presets:
   """ + "\n  ".join([f"{k:<15} : {v['desc']}" for k, v in PRESETS.items()])
     )
     
-    # Arguments
-    parser.add_argument("keywords", nargs="?", default="", help="Main search terms")
-    parser.add_argument("-s", "--site", help="Limit to specific site")
-    parser.add_argument("-f", "--filetype", help="Specific file type")
+    parser.add_argument("keywords", nargs="?", default="", help="Search terms")
+    parser.add_argument("-s", "--site", help="Target domain")
+    parser.add_argument("-f", "--filetype", help="File extension")
     parser.add_argument("--ext", help="Alias for filetype")
-    parser.add_argument("-u", "--inurl", help="String in URL")
-    parser.add_argument("-t", "--intitle", help="String in Title")
-    parser.add_argument("-i", "--intext", help="String in Body Text")
-    parser.add_argument("-e", "--exclude", help="Exclude keyword")
-    parser.add_argument("-p", "--preset", help=f"Use a built-in dork recipe")
-    parser.add_argument("--after", help="Search after date (YYYY-MM-DD)")
-    parser.add_argument("--before", help="Search before date (YYYY-MM-DD)")
+    parser.add_argument("-u", "--inurl", help="URL pattern")
+    parser.add_argument("-t", "--intitle", help="Title pattern")
+    parser.add_argument("-i", "--intext", help="Body text pattern")
+    parser.add_argument("-e", "--exclude", help="Exclude terms")
+    parser.add_argument("-p", "--preset", help="Use built-in dork")
+    parser.add_argument("--after", help="Date: After (YYYY-MM-DD)")
+    parser.add_argument("--before", help="Date: Before (YYYY-MM-DD)")
     
-    # Actions
+    parser.add_argument("--engine", default="google", choices=ENGINES.keys(), help="Select search engine")
+    parser.add_argument("--json", action="store_true", help="Output results as JSON")
+    parser.add_argument("--copy", action="store_true", help="Copy generated URL to clipboard")
+    
     parser.add_argument("-o", "--open", action="store_true", help="Open in browser")
-    parser.add_argument("--output", help="Save the query to a specific file")
-    parser.add_argument("--explain", action="store_true", help="Explain the query logic")
+    parser.add_argument("--output", help="Save to file")
+    parser.add_argument("--explain", action="store_true", help="Explain logic")
+    
+    parser.add_argument("--active", action="store_true", help="Performs active recon (DNS, Headers, Robots.txt)")
 
     if len(sys.argv) == 1:
         parser.print_help(sys.stderr)
@@ -174,37 +253,68 @@ Presets:
         
     args = parser.parse_args()
     
-    # Validation
-    if not (args.keywords or args.preset or any([args.site, args.filetype, args.ext, args.inurl, args.intitle, args.after])):
-         print("Error: You must provide keywords, a preset, or a search operator.")
+    if args.active:
+        if not args.site:
+            print("[!] Error: Active recon requires a target site via --site (e.g., --site example.com)")
+            sys.exit(1)
+        
+        active_data = perform_active_recon(args.site)
+        
+        if args.json:
+            print(json.dumps(active_data, indent=2))
+        
+        if args.output:
+            try:
+                with open(args.output, "a") as f:
+                    f.write(f"[{datetime.now()}] [ACTIVE] {json.dumps(active_data)}\n")
+                print(f"[Saved]: {args.output}")
+            except Exception as e:
+                print(f"[Error]: {e}")
+        
+        sys.exit(0)
+
+    if not (args.keywords or args.preset or any([args.site, args.filetype, args.ext, args.inurl, args.intitle])):
+         print("Error: Provide keywords, a preset, or an operator.")
          sys.exit(1)
 
-    # Build Query
     dork = create_dork_query(args)
-    
-    # 1. Explain Mode
+    base_url = ENGINES[args.engine]
+    encoded_query = urllib.parse.quote_plus(dork)
+    full_url = f"{base_url}{encoded_query}"
+
+    if args.json:
+        data = {
+            "timestamp": datetime.now().isoformat(),
+            "engine": args.engine,
+            "dork": dork,
+            "url": full_url,
+            "target": args.site if args.site else "global"
+        }
+        print(json.dumps(data, indent=2))
+        sys.exit(0)
+
     if args.explain:
         explain_dork(args, dork)
 
-    # 2. Print Query
     print(f"[NERD Query]: {dork}")
-    
-    # 3. Save to File
+    print(f"[Engine]: {args.engine}")
+    print(f"[Link]: {full_url}")
+
+    if args.copy:
+        if copy_to_clipboard(full_url):
+            print("[Success]: Link copied to clipboard!")
+
     if args.output:
         try:
             with open(args.output, "a") as f:
-                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                f.write(f"[{timestamp}] {dork}\n")
-            print(f"[Saved]: Appended to {args.output}")
+                f.write(f"[{datetime.now()}] ({args.engine}) {dork}\n")
+            print(f"[Saved]: {args.output}")
         except Exception as e:
-            print(f"[Error]: Could not save file - {e}")
+            print(f"[Error]: {e}")
 
-    # 4. Open in Browser
     if args.open:
-        encoded_query = urllib.parse.quote_plus(dork)
-        url = f"https://www.google.com/search?q={encoded_query}"
-        print(f"[Opening]: {url}")
-        webbrowser.open(url)
+        print(f"[Opening]: {full_url}")
+        webbrowser.open(full_url)
 
 if __name__ == "__main__":
     main()
