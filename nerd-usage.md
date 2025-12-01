@@ -25,6 +25,7 @@ Active Recon means the tool directly connects to the target server. This allows 
 - DNS Resolution: Finds the server's IP address.
 - Header Analysis: Identifies the server software (e.g., Apache, Nginx) and technology stack (e.g., PHP, ASP.NET).
 - Robots.txt Extraction: Finds paths the admin has explicitly hidden from search engines.
+
 Command:
 `./nerd.py --site example.com --active`
 
