@@ -44,6 +44,7 @@ To deploy Sidewinder to a victim machine without installing Python, compile it i
 ```powershell
 # In PowerShell:
 pyinstaller --onefile --clean --name sidewinder sidewinder.py
+```
 
 The resulting binary will be located at `dist\sidewinder.exe`. This file has zero external dependencies.
 
